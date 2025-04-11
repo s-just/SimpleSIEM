@@ -71,3 +71,19 @@ def convert_severity(sev_val):
             return ("debug", "debug-level messages")
         case _:
             return ("unknown", f"unknown severity value:{sev_val}")
+
+def categorize_priority_value(priority_value):
+    facility_value = priority_value // 8
+    severity_value = priority_value % 8
+
+    severity_name, _ = convert_severity(severity_value)
+    facility_name, _ = convert_facility(facility_value)
+
+    if severity_name in ["emergency", "alert", "critical"]:
+        return 0
+    elif severity_name == "error":
+        return 1
+    elif severity_name in ["warning", "notice"]:
+        return 2
+    else:
+        return 3

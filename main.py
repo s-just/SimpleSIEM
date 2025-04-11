@@ -5,17 +5,18 @@ import re
 import sys
 from datetime import datetime
 
-from priority_helper import convert_facility, convert_severity
+from priority_helper import convert_facility, convert_severity, categorize_priority_value
 
 HOST = '0.0.0.0'  # listen on all available network interfaces
 PORT = 514  # syslog port
 # syslog structure: <PRIORITY>TIMESTAMP HOSTNAME PROCESS: MESSAGE
 
 # regex pattern needed to match log data
-SYSLOG_PATTERN = re.compile(r"<(\d+)>([A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(\S+)\[(\d+)]:\s(.*)")
+SYSLOG_PATTERN = re.compile(r"<(\d+)>([A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+(\S+)(?:\[(\d+)\])?:?\s+(.*)")
 LOG_FILE_NAME_BASE = "syslog.log"
 LOGS_DIRECTORY = "logs"
 session_logs = []
+monitoring_level = 2
 
 class Syslog:
     data = None
@@ -29,7 +30,6 @@ class Syslog:
     message = None
 
     parsed = False
-
 
     log_monitor_level = -1
 
@@ -61,6 +61,7 @@ class Syslog:
             self.severity = int(self.priority % 8)
             self.facility_info = convert_facility(self.facility)
             self.severity_info = convert_severity(self.severity)
+            self.log_monitor_level = categorize_priority_value(self.priority)
             print("Log parsed successfully")
             print("-" * 5)
             return True
@@ -69,19 +70,20 @@ class Syslog:
         return False
 
     def print_info(self):
-        if self.parsed == False:
-            print(
-                f"! Failed to print syslog information, no data was parsed previously or the data of this log failed to parse")
+        if not self.parsed and self.log_monitor_level >= 0:
+            print(f"! Failed to print syslog information, no data was parsed previously or the data of this log failed to parse")
             print("-" * 5)
             return
-        print(f"::syslog parsed from {addr}")
-        print(f"  PRIORITY: {self.priority} | facility: {self.facility_info[0]} - {self.facility_info[1]} | severity: {self.severity_info[0]} - {self.severity_info[1]}")
-        print(f"  TIMESTAMP: {self.timestamp}")
-        print(f"  HOSTNAME: {self.hostname}")
-        print(f"  PROCESS_NAME: {self.process_name}")
-        print(f"  PID: {self.pid if self.pid else 'N/A'}")
-        print(f"  MESSAGE: {self.message}")
-        print("-" * 5)
+        if self.log_monitor_level <= monitoring_level:
+            print(f"::syslog parsed from {addr}")
+            if (self.priority != None):
+                print(f"  PRIORITY: {self.priority} | facility: {self.facility_info[0]} - {self.facility_info[1]} | severity: {self.severity_info[0]} - {self.severity_info[1]} | log_monitor_level: {self.log_monitor_level}")
+            print(f"  TIMESTAMP: {self.timestamp}")
+            print(f"  HOSTNAME: {self.hostname}")
+            print(f"  PROCESS_NAME: {self.process_name}")
+            print(f"  PID: {self.pid if self.pid else 'N/A'}")
+            print(f"  MESSAGE: {self.message}")
+            print("-" * 5)
 
     def to_dict(self):
         return {
