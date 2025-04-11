@@ -16,7 +16,7 @@ SYSLOG_PATTERN = re.compile(r"<(\d+)>([A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})
 LOG_FILE_NAME_BASE = "syslog.log"
 LOGS_DIRECTORY = "logs"
 session_logs = []
-monitoring_level = 2
+monitoring_level = 3
 
 class Syslog:
     data = None
