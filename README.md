@@ -73,3 +73,4 @@ This SIEM is currently designed to primarily capture and read syslog messages.
 * More varied interface filters and controls.
 * Support for more log formats or input methods.
 * Basic alerting
+* Improve thread handling
