@@ -59,7 +59,7 @@ This SIEM is currently designed to primarily capture and read syslog messages.
     * Configure your devices (Linux servers, Windows machines with NXLog, etc.) to send syslog messages via **UDP** to the IP address of the machine running SimpleSIEM, on port `5140`, or whatever port you prefer.
 ## Key Files
 
-* `main_gui.py` (or your main application file): The main entry point and GUI for the application.
+* `main_gui.py` Currenty used as the application file, the main entry point and GUI for the application.
 * `siem_core.py`: Core logic for listening to and parsing syslog messages.
 * `filter_logic.py`: Handles the custom text-based filtering.
 * `priority_helper.py`: Contains utility functions for syslog facility and severity codes.
