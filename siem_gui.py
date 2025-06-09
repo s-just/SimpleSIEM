@@ -1,3 +1,19 @@
+"""
+SIEM GUI - Main Application Window and User Interface
+
+Handles:
+1. PyQt5-based graphical interface for log monitoring
+2. Real-time log display with filtering capabilities
+3. Configurable logging to JSON files
+4. Multi-threaded logic for syslog parsing/listening
+
+Key Parts:
+- MainWindow: Primary application window with log table and controls
+- Log filtering by severity level and custom text patterns
+- Persistent QSettings storage
+- File-based logging with 24h rotation
+"""
+
 import sys
 import socket
 import time
@@ -15,36 +31,110 @@ from siem_core import SysLogListener, Syslog, DEFAULT_LOGS_DIRECTORY
 from filter_logic import LogFilter
 import theme
 
+# Settings keys for persistent storage
 SETTINGS_LOG_DIR = "logging/logDirectory"
 SETTINGS_LOG_ENABLED = "logging/logEnabled"
 SETTINGS_MONITOR_LEVEL = "filtering/monitorLevel"
 
+
 class MainWindow(QMainWindow):
+    """
+    Main application window.
+
+    - Real-time syslog display in table format
+    - Configurable severity level filtering
+    - Text-based log filtering
+    - Optional JSON file logging with 24h rotation
+    - Persistent settings
+    """
+
     def __init__(self, parent=None):
+        """Initialize main window and load user settings."""
         super().__init__(parent)
 
+        # Load persistent settings
         self.settings = QSettings("SJust", "Simple SIEM")
 
+        # Window configuration
         self.setWindowTitle("Simple SIEM")
         self.setGeometry(100, 100, 1100, 750)
 
+        # Load user preferences
         self.log_directory = self.settings.value(SETTINGS_LOG_DIR, DEFAULT_LOGS_DIRECTORY)
+
+        # Handle logging enabled setting (cross-platform string/bool handling)
         log_enabled_setting = self.settings.value(SETTINGS_LOG_ENABLED, False)
-        self.logging_enabled = log_enabled_setting == 'true' if isinstance(log_enabled_setting, str) else bool(log_enabled_setting)
+        if isinstance(log_enabled_setting, str):
+            self.logging_enabled = log_enabled_setting == 'true'
+        else:
+            self.logging_enabled = bool(log_enabled_setting)
+
+        # Load monitor level setting
         monitor_level_setting = self.settings.value(SETTINGS_MONITOR_LEVEL, -1)
         try:
             self.current_monitor_level = int(monitor_level_setting)
         except ValueError:
             self.current_monitor_level = -1
 
+        # Initialize filter system
         self.current_filter = LogFilter()
 
+        # Build user interface
+        self._setup_ui()
+
+        # Start background syslog listener
+        self.listener_thread = None
+        self.listener = None
+        self.setup_listener_thread()
+
+        # Apply initial filters
+        self.apply_filter(is_initial=True)
+
+    def _setup_ui(self):
+        """Create and configure all UI components."""
+        # Main layout setup
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
         self._create_menu_bar()
+        self._create_level_filter_controls(main_layout)
+        self._create_text_filter_controls(main_layout)
+        self._create_log_table(main_layout)
+        self._create_status_bar()
 
+    def _create_menu_bar(self):
+        """Create application menu bar with file operations."""
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("&File")
+
+        # Logging toggle
+        self.log_action = QAction("Enable Logging", self, checkable=True)
+        self.log_action.setChecked(self.logging_enabled)
+        self.log_action.toggled.connect(self._toggle_logging)
+        file_menu.addAction(self.log_action)
+
+        # Log directory selection
+        set_dir_action = QAction("Set Log Directory...", self)
+        set_dir_action.triggered.connect(self._set_log_directory)
+        file_menu.addAction(set_dir_action)
+
+        file_menu.addSeparator()
+
+        # Display management
+        clear_action = QAction("Clear Display", self)
+        clear_action.triggered.connect(self.clear_table)
+        file_menu.addAction(clear_action)
+
+        file_menu.addSeparator()
+
+        # Application exit
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+    def _create_level_filter_controls(self, main_layout):
+        """Create severity level filtering dropdown."""
         level_layout = QHBoxLayout()
         level_layout.addWidget(QLabel("Monitoring Level:"))
 
@@ -55,6 +145,7 @@ class MainWindow(QMainWindow):
         self.level_combo.addItem("Warning / Notice (2)", 2)
         self.level_combo.addItem("Informational / Debug (3)", 3)
 
+        # Set current selection from settings
         level_index = self.level_combo.findData(self.current_monitor_level)
         if level_index != -1:
             self.level_combo.setCurrentIndex(level_index)
@@ -65,7 +156,10 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(level_layout)
 
+    def _create_text_filter_controls(self, main_layout):
+        """Create text filtering input and controls."""
         filter_layout = QHBoxLayout()
+
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("Enter text filter (process=sshd && message(\"failed\"))")
         self.filter_input.returnPressed.connect(self.apply_filter)
@@ -81,6 +175,8 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(filter_layout)
 
+    def _create_log_table(self, main_layout):
+        """Create and configure the main log display table."""
         self.log_display = QTableWidget()
         self.log_display.setReadOnly = True
         self.log_display.setAlternatingRowColors(True)
@@ -88,89 +184,61 @@ class MainWindow(QMainWindow):
         self.log_display.setEditTriggers(QTableWidget.NoEditTriggers)
         self.log_display.setSortingEnabled(False)
 
+        # Configure table columns
         self.column_headers = ["Timestamp", "Hostname", "Severity", "Facility", "Process", "PID", "Message"]
         self.log_display.setColumnCount(len(self.column_headers))
         self.log_display.setHorizontalHeaderLabels(self.column_headers)
 
+        # Set column resize behavior
         header = self.log_display.horizontalHeader()
-        header.setSectionResizeMode(6, QHeaderView.Stretch) # Message column
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents) # Timestamp
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents) # Hostname
+        header.setSectionResizeMode(6, QHeaderView.Stretch)  # Message column stretches
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Timestamp
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Hostname
         for i in range(2, 6):
-             header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
-             # header.setSectionResizeMode(i, QHeaderView.Interactive)
+            header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
 
         main_layout.addWidget(self.log_display)
 
+    def _create_status_bar(self):
+        """Create application status bar."""
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready.", 3000)
 
-        self.listener_thread = None
-        self.listener = None
-        self.setup_listener_thread()
-
-        self.apply_filter(is_initial=True)
-
-    def _create_menu_bar(self):
-        """ Creates the main application menu bar and actions. """
-        menu_bar = self.menuBar()
-
-        file_menu = menu_bar.addMenu("&File")
-
-        # Enable/Disable Logging Action
-        self.log_action = QAction("Enable Logging", self, checkable=True)
-        self.log_action.setChecked(self.logging_enabled)
-        self.log_action.toggled.connect(self._toggle_logging)
-        file_menu.addAction(self.log_action)
-
-        # Set Log Directory Action
-        set_dir_action = QAction("Set Log Directory...", self)
-        set_dir_action.triggered.connect(self._set_log_directory)
-        file_menu.addAction(set_dir_action)
-
-        file_menu.addSeparator()
-
-        # Clear Display Action
-        clear_action = QAction("Clear Display", self)
-        clear_action.triggered.connect(self.clear_table)
-        file_menu.addAction(clear_action)
-
-        file_menu.addSeparator()
-
-        # Exit Action
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
     def setup_listener_thread(self):
+        """Initialize and start background syslog listener thread."""
         self.listener_thread = QThread(self)
         self.listener = SysLogListener()
         self.listener.moveToThread(self.listener_thread)
+
+        # Connect thread and listener signals
         self.listener_thread.started.connect(self.listener.run)
         self.listener.log_received.connect(self._handle_new_log)
         self.listener.status_update.connect(self.status_bar.showMessage)
         self.listener_thread.finished.connect(self.listener.deleteLater)
         self.listener_thread.finished.connect(self.listener_thread.deleteLater)
         self.listener_thread.finished.connect(lambda: self.status_bar.showMessage("Listener Thread Finished", 3000))
+
         self.listener_thread.start()
         self.status_bar.showMessage("Listener Thread Started", 3000)
 
     @pyqtSlot(object)
     def _handle_new_log(self, syslog_obj):
-        """ Handles incoming logs, writes to file if enabled, checks filters, adds to table. """
-        # 1. Log to file
+        """
+        Process incoming syslog messages from listener thread.
+
+        Handles file logging, filter application, and UI updates.
+        """
+        # Write to file if logging enabled
         if self.logging_enabled:
             self._write_log_to_file(syslog_obj)
 
-        # 2. Check filters
+        # Validate syslog object
         if not isinstance(syslog_obj, Syslog):
-             print(f"Received non-Syslog object: {type(syslog_obj)}")
-             # Show errors regardless of filters? Maybe add an "error" row type
-             # For now,no added non-syslog objects to the display
-             return
+            print(f"Received non-Syslog object: {type(syslog_obj)}")
+            return
 
-        # Check Level Filter
+        # Apply severity level filter
         level_match = (self.current_monitor_level == -1 or
                        (syslog_obj.log_monitor_level is not None and
                         syslog_obj.log_monitor_level <= self.current_monitor_level))
@@ -178,32 +246,27 @@ class MainWindow(QMainWindow):
         if not level_match:
             return
 
-        # Check Text Filter (only if level matches)
-        # Note: current_filter might not be updated instantly if user types fast
-        # generally okay, relies on apply_filter being called
+        # Apply text filter
         if self.current_filter.matches(syslog_obj):
             if not syslog_obj.parsed:
                 print(f"Adding unparsed Syslog object that matched filters: {syslog_obj.to_string()}")
                 self._add_table_row(["", "", "", "", "", "", syslog_obj.to_string()], None)
             else:
-                 self._add_syslog_to_table(syslog_obj)
-
+                self._add_syslog_to_table(syslog_obj)
 
     def _write_log_to_file(self, syslog_obj):
-        """ Appends a Syslog object (as JSON) to the daily log file. """
+        """Write syslog entry to daily JSON log file."""
         try:
             # Ensure log directory exists
             os.makedirs(self.log_directory, exist_ok=True)
 
-            # Generate filename (syslog_2025-04-12.json.log)
+            # Generate daily filename
             today_date = time.strftime('%Y-%m-%d')
             filename = f"syslog_{today_date}.json.log"
             filepath = os.path.join(self.log_directory, filename)
 
-            # Convert Syslog object to dictionary
+            # Write JSON entry
             log_dict = syslog_obj.to_dict()
-
-            # Append JSON object as a new line
             with open(filepath, 'a', encoding='utf-8') as f:
                 json.dump(log_dict, f)
                 f.write('\n')
@@ -211,16 +274,12 @@ class MainWindow(QMainWindow):
         except IOError as e:
             print(f"Error writing to log file {filepath}: {e}")
             self.status_bar.showMessage(f"Log Write Error: {e}", 5000)
-            # Disable logging automatically on error?
-            # self.logging_enabled = False
-            # self.log_action.setChecked(False)
-            # self.settings.setValue(SETTINGS_LOG_ENABLED, False)
         except Exception as e:
-             print(f"Unexpected error during log writing: {e}")
-             self.status_bar.showMessage(f"Log Write Error: {e}", 5000)
-
+            print(f"Unexpected error during log writing: {e}")
+            self.status_bar.showMessage(f"Log Write Error: {e}", 5000)
 
     def _add_syslog_to_table(self, syslog_obj: Syslog):
+        """Convert Syslog object to table row data and add to display."""
         row_data = [
             syslog_obj.timestamp or "N/A",
             syslog_obj.hostname or "N/A",
@@ -233,108 +292,113 @@ class MainWindow(QMainWindow):
         self._add_table_row(row_data, syslog_obj)
 
     def _add_table_row(self, row_data, syslog_obj=None):
+        """Add new row to log display table with proper formatting."""
         try:
             row_position = self.log_display.rowCount()
             self.log_display.insertRow(row_position)
+
             for col_index, data in enumerate(row_data):
                 item = QTableWidgetItem(str(data))
                 if col_index == 6 and syslog_obj and syslog_obj.message:
-                     item.setToolTip(str(syslog_obj.message))
+                    item.setToolTip(str(syslog_obj.message))
                 self.log_display.setItem(row_position, col_index, item)
                 if col_index == 0 and syslog_obj:
                     item.setData(Qt.UserRole, syslog_obj)
-            # Only scroll if the vertical scrollbar is near the bottom
+
+            # Auto-scroll if user is near bottom
             scrollbar = self.log_display.verticalScrollBar()
             if scrollbar.value() >= scrollbar.maximum() - 15:
-                 self.log_display.scrollToBottom()
+                self.log_display.scrollToBottom()
+
         except Exception as e:
             print(f"Error adding row to table: {e}")
             self.status_bar.showMessage(f"Error displaying log: {e}", 5000)
 
-    @pyqtSlot(int) # Slot receives the index from the combobox signal
+    @pyqtSlot(int)
     def _update_monitor_level(self, index):
-        """ Updates the monitoring level based on combobox selection and reapplies filters. """
-        new_level = self.level_combo.itemData(index) # Get stored level (-1, 0, 1, 2, 3)
+        """Update severity level filter and reapply all filters."""
+        new_level = self.level_combo.itemData(index)
         if new_level != self.current_monitor_level:
             self.current_monitor_level = new_level
             self.settings.setValue(SETTINGS_MONITOR_LEVEL, self.current_monitor_level)
             level_text = self.level_combo.itemText(index)
             self.status_bar.showMessage(f"Monitor level set to: {level_text}", 3000)
             print(f"Monitor level changed to: {self.current_monitor_level}")
-            self.apply_filter() # Re-apply all filters
+            self.apply_filter()
 
     @pyqtSlot()
-    def apply_filter(self, is_initial=False): # flag for initial call
-        """ Parses text filter, then applies BOTH level and text filters to table rows. """
+    def apply_filter(self, is_initial=False):
+        """Parse text filter and apply both level and text filters to table rows."""
         filter_text = self.filter_input.text()
 
-        if not is_initial: # Avoid the status message spam on startup
+        if not is_initial:
             if filter_text:
                 self.status_bar.showMessage(f"Applying filters...", 2000)
             else:
                 self.status_bar.showMessage("Applying level filter...", 2000)
 
-        # Parse the text filter first
+        # Parse text filter
         try:
             self.current_filter = LogFilter(filter_text)
             if self.current_filter.error:
-                 self.status_bar.showMessage(f"Text Filter Error: {self.current_filter.error}", 5000)
-                 # Let's stop.
-                 return
+                self.status_bar.showMessage(f"Text Filter Error: {self.current_filter.error}", 5000)
+                return
         except Exception as e:
-             self.status_bar.showMessage(f"Unexpected Text Filter Error: {e}", 5000)
-             self.current_filter = LogFilter() # Reset to prevent issues
-             return
+            self.status_bar.showMessage(f"Unexpected Text Filter Error: {e}", 5000)
+            self.current_filter = LogFilter()
+            return
 
-        # Iterate through rows and apply BOTH filters
+        # Apply filters to all table rows
         self.log_display.setUpdatesEnabled(False)
         rows_shown = 0
+
         for row in range(self.log_display.rowCount()):
             should_be_visible = False
             item = self.log_display.item(row, 0)
-            if not item: continue
+            if not item:
+                continue
 
             syslog_obj = item.data(Qt.UserRole)
             if isinstance(syslog_obj, Syslog):
-                # 1. Check Level Filter
+                # Check level filter
                 level_match = (self.current_monitor_level == -1 or
                                (syslog_obj.log_monitor_level is not None and
                                 syslog_obj.log_monitor_level <= self.current_monitor_level))
 
-                # 2. Check Text Filter (only if level matches)
+                # Check text filter if level matches
                 if level_match:
                     text_match = self.current_filter.matches(syslog_obj)
                     if text_match:
                         should_be_visible = True
             else:
-                 # Handle non-syslog rows (old errors) - show if no filters active?
-                 if self.current_monitor_level == -1 and not self.current_filter.filter_string:
-                      should_be_visible = True
+                # Handle non-syslog rows (error messages)
+                if self.current_monitor_level == -1 and not self.current_filter.filter_string:
+                    should_be_visible = True
 
             self.log_display.setRowHidden(row, not should_be_visible)
             if should_be_visible:
-                 rows_shown += 1
+                rows_shown += 1
 
         self.log_display.setUpdatesEnabled(True)
         if not is_initial:
-             self.status_bar.showMessage(f"Filters applied. Showing {rows_shown} rows.", 3000)
+            self.status_bar.showMessage(f"Filters applied. Showing {rows_shown} rows.", 3000)
 
     @pyqtSlot()
     def reset_filter(self):
-        """ Clears the text filter input and applies filters. """
+        """Clear text filter input and reapply filters."""
         self.filter_input.clear()
         self.apply_filter()
 
     @pyqtSlot()
     def clear_table(self):
-        """ Removes all rows from the log display table. """
+        """Remove all rows from log display table."""
         self.log_display.setRowCount(0)
         self.status_bar.showMessage("Display cleared.", 3000)
         print("Log display table cleared.")
 
     @pyqtSlot(bool)
     def _toggle_logging(self, checked):
-        """ Handles the Enable Logging menu action. """
+        """Handle logging enable/disable from menu."""
         self.logging_enabled = checked
         self.settings.setValue(SETTINGS_LOG_ENABLED, self.logging_enabled)
         if checked:
@@ -346,31 +410,32 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _set_log_directory(self):
-        """ Opens dialog to choose log directory and updates setting. """
+        """Open directory selection dialog and update log directory setting."""
         new_dir = QFileDialog.getExistingDirectory(
             self,
             "Select Log Output Directory",
-            self.log_directory # Start in the current log directory
+            self.log_directory
         )
-        if new_dir and new_dir != self.log_directory: # Check if a directory was selected and it's different
+        if new_dir and new_dir != self.log_directory:
             self.log_directory = new_dir
             self.settings.setValue(SETTINGS_LOG_DIR, self.log_directory)
             self.status_bar.showMessage(f"Log directory set to: {self.log_directory}", 4000)
             print(f"Log directory set to: {self.log_directory}")
-            # Update status if logging is already enabled
             if self.logging_enabled:
-                 self.status_bar.showMessage(f"Logging enabled. Saving to: {self.log_directory}", 4000)
+                self.status_bar.showMessage(f"Logging enabled. Saving to: {self.log_directory}", 4000)
 
     def closeEvent(self, event):
-        """ Handles window close; stops listener, saves settings. """
+        """Handle application shutdown: stop listener thread and save settings."""
         self.status_bar.showMessage("Closing application...")
         print("Saving settings...")
-        # Ensure latest values are saved ( safe)
+
+        # Save all settings
         self.settings.setValue(SETTINGS_LOG_DIR, self.log_directory)
         self.settings.setValue(SETTINGS_LOG_ENABLED, self.logging_enabled)
         self.settings.setValue(SETTINGS_MONITOR_LEVEL, self.current_monitor_level)
         self.settings.sync()
 
+        # Gracefully stop listener thread
         if self.listener_thread and self.listener_thread.isRunning():
             print("Stopping listener thread...")
             if self.listener:
@@ -383,17 +448,20 @@ class MainWindow(QMainWindow):
                 print("Listener thread stopped successfully.")
         else:
             print("Listener thread not running or already stopped.")
+
         print("Exiting application.")
         event.accept()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setOrganizationName("SJust")
     app.setApplicationName("SIEM Log Monitor")
 
+    # Apply dark theme if available
     try:
         app.setStyleSheet(theme.DARK_STYLE)
-    except Exception as e: # Catch broader errors
+    except Exception as e:
         print(f"Warning: Could not load theme.DARK_STYLE: {e}. Using default style.")
 
     main_window = MainWindow()
