@@ -34,7 +34,7 @@ This SIEM is currently designed to primarily capture and read syslog messages.
 
 ## Requirements
 
-* Python 3.x
+* Python 3.x (3.10+ preferred)
 * PyQt5
 
 ## Getting Started
