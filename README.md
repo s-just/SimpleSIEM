@@ -1,8 +1,8 @@
 # SimpleSIEM
 
-A basic/ongoing homelab Security Information and Event Management (SIEM) tool built with Python and PyQt5 for educational pruposes. Currently listens for syslog messages, parses them, has real-time filtering and display, and saves logs to daily files. This is
+A basic/ongoing homelab Security Information and Event Management (SIEM) tool built with Python and PyQt5 for educational pruposes. Currently listens for syslog messages, parses them, has real-time filtering and display, and saves logs to daily files.
 
-**⚠️ Disclaimer: Not for Professional Use ⚠️**
+**Disclaimer: Educational Use Only**
 
 This project is a personal learning exercise and is **not in anyway a professional-grade SIEM solution**. It is intended for peronal-use: educational and experimental purposes only.
 
